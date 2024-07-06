@@ -181,13 +181,13 @@ def unsloth_save_model(
     model,
     tokenizer,
     save_directory       : Union[str, os.PathLike],
-    save_method          : str = "lora", # ["lora", "merged_16bit", "merged_4bit"]
+    save_method          : str = "merged_16bit", # ["lora", "merged_16bit", "merged_4bit"]
     push_to_hub          : bool = False,
     token                : Optional[Union[str, bool]] = None,
     is_main_process      : bool = True,
     state_dict           : Optional[dict] = None,
     save_function        : Callable = torch.save,
-    max_shard_size       : Union[int, str] = "5GB",
+    max_shard_size       : Union[int, str] = "10GB",
     safe_serialization   : bool = True,
     variant              : Optional[str] = None,
     save_peft_format     : bool = True,
