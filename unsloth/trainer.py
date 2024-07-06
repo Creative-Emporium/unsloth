@@ -14,13 +14,14 @@
 
 from dataclasses import dataclass, field
 from typing import Optional
-from transformers import TrainingArguments
+from transformers import TrainingArguments, Trainer
 from trl import SFTTrainer
 from . import is_bfloat16_supported
 
 __all__ = [
     "UnslothTrainingArguments",
     "UnslothTrainer",
+    "UnslothPreTrainer",
 ]
 
 
@@ -84,6 +85,24 @@ class UnslothTrainer(SFTTrainer):
 
         if self.optimizer is None:
             optimizer_cls, optimizer_kwargs = SFTTrainer.get_optimizer_cls_and_kwargs(self.args)
+            self.optimizer = _create_unsloth_optimizer(
+                self.model,
+                optimizer_cls,
+                optimizer_kwargs,
+                embedding_learning_rate,
+            )
+        pass
+        return self.optimizer
+    pass
+pass
+
+class UnslothPreTrainer(Trainer):
+    def create_optimizer(self):
+        embedding_learning_rate = getattr(self.args, "embedding_learning_rate", None)
+        if embedding_learning_rate is None: return super().create_optimizer()
+
+        if self.optimizer is None:
+            optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
             self.optimizer = _create_unsloth_optimizer(
                 self.model,
                 optimizer_cls,
