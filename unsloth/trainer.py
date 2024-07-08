@@ -109,9 +109,23 @@ class UnslothTrainer(SFTTrainer):
 pass
 
 class UnslothPreTrainer(Trainer):
+    def __init__(self, model, args, data_collator=None, train_dataset=None, eval_dataset=None, tokenizer=None, model_init=None, compute_metrics=None, callbacks=None, optimizers=(None, None)):
+        super().__init__(model, args, data_collator, train_dataset, eval_dataset, tokenizer, model_init, compute_metrics, callbacks, optimizers)
+        self.dataset_text_field = args.dataset_text_field
+        self.max_seq_length = args.max_seq_length
+        self.dataset_num_proc = args.dataset_num_proc
+
+    def preprocess_datasets(self, datasets):
+        def tokenize_function(examples):
+            return self.tokenizer(examples[self.dataset_text_field], padding="max_length", truncation=True, max_length=self.max_seq_length)
+
+        tokenized_datasets = datasets.map(tokenize_function, batched=True, num_proc=self.dataset_num_proc)
+        return tokenized_datasets
+
     def create_optimizer(self):
         embedding_learning_rate = getattr(self.args, "embedding_learning_rate", None)
-        if embedding_learning_rate is None: return super().create_optimizer()
+        if embedding_learning_rate is None:
+            return super().create_optimizer()
 
         if self.optimizer is None:
             optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
@@ -121,7 +135,6 @@ class UnslothPreTrainer(Trainer):
                 optimizer_kwargs,
                 embedding_learning_rate,
             )
-        pass
         return self.optimizer
     pass
 pass
