@@ -14,7 +14,8 @@
 
 from dataclasses import dataclass, field
 from typing import Optional
-from transformers import TrainingArguments, Trainer
+from transformers import TrainingArguments
+from transformers.trainer import Trainer
 from trl import SFTTrainer
 from . import is_bfloat16_supported
 
