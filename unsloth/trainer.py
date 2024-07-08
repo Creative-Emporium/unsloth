@@ -24,19 +24,25 @@ __all__ = [
     "UnslothTrainer",
     "UnslothPreTrainer",
 ]
-
+"""
 import argparse 
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--trainer_type", choices=["sft", "pretrain"], default="pretrain", 
-                    help="Choose between SFTTrainer and UnslothPreTrainer")
+                    help="Choose between UnslothTrainer and UnslothPreTrainer")
 args, unknown = parser.parse_known_args()
 
 if args.trainer_type == "sft":
     trainer_class = UnslothTrainer
 else:
     trainer_class = UnslothPreTrainer
-    
+"""
+def get_trainer_class(trainer_type):
+    if trainer_type == "sft":
+        return UnslothTrainer
+    else:
+        return UnslothPreTrainer
+        
 @dataclass
 class UnslothTrainingArguments(TrainingArguments):
     embedding_learning_rate : Optional[float] = field(
