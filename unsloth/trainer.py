@@ -30,7 +30,7 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("--trainer_type", choices=["sft", "pretrain"], default="pretrain", 
                     help="Choose between SFTTrainer and UnslothPreTrainer")
-args = parser.parse_args()
+args, unknown = parser.parse_known_args()
 
 if args.trainer_type == "sft":
     trainer_class = UnslothTrainer
