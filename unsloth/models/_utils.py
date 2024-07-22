@@ -65,8 +65,26 @@ logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.CRITI
 
 # =============================================
 # Edits all Config files to enable RoPE Scaling for all models
-from transformers import PretrainedConfig
 
+# Transformers had to update for Mistral Nemo 12b since Attention is (5120, 4096) now.
+def patch_mistral_nemo_config(config):
+    if "head_dim (" not in config:
+        add_head_dim = "If it is not specified, will default to `8`.\n"\
+            "        head_dim (`int`, *optional*, defaults to `hidden_size // num_attention_heads`):\n"\
+            "            The attention head dimension."
+        config = config.replace("If it is not specified, will default to `8`.", add_head_dim)
+
+        add_head_dim = "num_key_value_heads=8,\n        head_dim=None,"
+        config = config.replace("num_key_value_heads=8,", add_head_dim)
+
+        add_head_dim = "self.sliding_window = sliding_window\n        self.head_dim = head_dim or hidden_size // num_attention_heads\n"
+        config = config.replace("self.sliding_window = sliding_window", add_head_dim)
+    pass
+    return config
+pass
+
+from transformers import __version__ as transformers_version
+from transformers import PretrainedConfig
 model_architectures = ["llama", "mistral", "gemma", "gemma2", "qwen2",]
 
 for model_name in model_architectures:
@@ -87,8 +105,14 @@ for model_name in model_architectures:
         r"\n        self.rope_scaling = rope_scaling\n",
         config,
     )
-    exec(config, globals())
 
+    # Just for Mistral Nemo
+    if model_name == "mistral":
+        if Version(transformers_version) <= Version("4.42.4"):
+            config = patch_mistral_nemo_config(config)
+    pass
+
+    exec(config, globals())
     exec(f"import {config_filepath}", globals())
     exec(f"{config_filepath}.{config_filename} = {config_filename}", globals())
 pass
@@ -97,7 +121,6 @@ pass
 # =============================================
 # torch.cuda.amp.custom_fwd is deprecated >= 2.4
 import torch
-from packaging.version import Version
 if Version(torch.__version__) < Version("2.4.0"):
     torch_amp_custom_fwd = torch.cuda.amp.custom_fwd
     torch_amp_custom_bwd = torch.cuda.amp.custom_bwd
@@ -145,7 +168,15 @@ from xformers import __version__ as xformers_version
 # Temporarily disable 0.0.27 and higher - inference issues
 if Version(xformers_version) >= Version("0.0.27"):
     raise ImportError(
-        f"Unsloth: Your xformers version of {xformers_version} is too new.\n"\
+        "Unsloth: If you are in Colab, we updated the top cell install instructions - please change it to below "\
+        "then press Disconnect Runtime and then Restart it.\n"\
+        "\n"\
+        "%%capture\n"
+        "# Installs Unsloth, Xformers (Flash Attention) and all other packages!\n"
+        '!pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"\n'
+        '!pip install --no-deps "xformers<0.0.27" "trl<0.9.0" peft accelerate bitsandbytes\n'\
+        '\n'\
+        f"Otherwise in local machines, your xformers version of {xformers_version} is too new.\n"\
         'Please downgrade xformers via `pip install --force-reinstall "xformers<0.0.27"'
     )
 pass
@@ -154,7 +185,15 @@ pass
 from trl import __version__ as trl_version
 if Version(xformers_version) >= Version("0.9.0"):
     raise ImportError(
-        f"Unsloth: Your TRL version of {trl_version} is too new.\n"\
+        "Unsloth: If you are in Colab, we updated the top cell install instructions - please change it to below "\
+        "then press Disconnect Runtime and then Restart it.\n"\
+        "\n"\
+        "%%capture\n"
+        "# Installs Unsloth, Xformers (Flash Attention) and all other packages!\n"
+        '!pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"\n'
+        '!pip install --no-deps "xformers<0.0.27" "trl<0.9.0" peft accelerate bitsandbytes\n'\
+        '\n'\
+        f"Otherwise in local machines, your TRL version of {trl_version} is too new.\n"\
         'Please downgrade TRL via `pip install --force-reinstall "trl<0.9.0"'
     )
 pass
@@ -732,7 +771,7 @@ def patch_linear_scaling(
         "self.rotary_emb = .+?\)", function,
         flags = re.DOTALL | re.MULTILINE,
     )
-    if len(rotary_emb) == 0: return
+    if len(rotary_emb) == 0: return None, function
     rotary_emb = rotary_emb[0]
     function = function.replace(rotary_emb, fix_rope_function, 1)
     function = exec_code + "\n\n" + function

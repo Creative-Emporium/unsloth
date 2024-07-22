@@ -78,6 +78,9 @@ def MistralAttention_fast_forward(
     if past_key_value is not None:
         kv_seq_len += past_key_value[0].shape[-2]
 
+    # Extend RoPE dynamically to fit in VRAM
+    self.rotary_emb.extend_rope_embedding(V, seq_len = kv_seq_len)
+
     if position_ids is None:
         cos = self.rotary_emb.cos_cached
         sin = self.rotary_emb.sin_cached
@@ -158,7 +161,7 @@ def MistralAttention_fast_forward(
         A = A.transpose(1, 2).contiguous()
     pass
     
-    attn_output = A.reshape(bsz, q_len, self.hidden_size)
+    attn_output = A.reshape(bsz, q_len, n_heads*head_dim)
     attn_output = self.apply_o(self, attn_output)
     attn_weights = None
     return attn_output, attn_weights, past_key_value
@@ -267,6 +270,24 @@ def MistralForCausalLM_fast_forward(
 pass
 
 
+# Transformers had to update for Mistral Nemo 12b since Attention is (5120, 4096) now.
+def patch_mistral_nemo_attention(function):
+    function = function.replace(
+        "(self.head_dim * self.num_heads) != self.hidden_size",
+        "False",
+    )
+    function = function.replace(
+        "self.head_dim = self.hidden_size // self.num_heads",
+        "self.head_dim = config.head_dim",
+    )
+    function = function.replace(
+        "self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)",
+        "self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)",
+    )
+    return function
+pass
+
+
 class FastMistralModel(FastLlamaModel):
 
     @staticmethod
@@ -277,7 +298,10 @@ class FastMistralModel(FastLlamaModel):
             scaled_rope_module = LlamaLinearScalingRotaryEmbedding,
             attention_module   = MistralAttention,
         )
-        if init_name is not None:
+        # Just for Mistral Nemo models!
+        if function is not None:
+            function = patch_mistral_nemo_attention(function)
+            # if True:#init_name is not None:
             exec(function, globals())
             MistralAttention.__init__  = eval(init_name)
         pass

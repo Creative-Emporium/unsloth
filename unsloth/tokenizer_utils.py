@@ -40,6 +40,19 @@ IGNORED_TOKENIZER_CHECKING = frozenset((
     "CodeLlamaTokenizer",
 ))
 
+
+IGNORED_TOKENIZER_NAMES = [
+    # "unsloth/Mistral-Nemo-Instruct-2407-bnb-4bit",
+    # "unsloth/Mistral-Nemo-Instruct-2407",
+    # "mistralai/Mistral-Nemo-Instruct-2407",
+    # "unsloth/Mistral-Nemo-Base-2407-bnb-4bit",
+    # "unsloth/Mistral-Nemo-Base-2407",
+    # "mistralai/Mistral-Nemo-Base-2407",
+]
+IGNORED_TOKENIZER_NAMES = frozenset(
+    [x.lower() for x in IGNORED_TOKENIZER_NAMES]
+)
+
 # Check environments
 keynames = "\n" + "\n".join(os.environ.keys())
 IS_COLAB_ENVIRONMENT  = "\nCOLAB_"  in keynames
@@ -488,7 +501,9 @@ def load_correct_tokenizer(
         cache_dir         = cache_dir,
     )
 
-    if slow_tokenizer is not None:
+    if tokenizer_name in IGNORED_TOKENIZER_NAMES:
+        return fast_tokenizer
+    elif slow_tokenizer is not None:
         if hasattr(fast_tokenizer, "add_bos_token") and hasattr(slow_tokenizer, "add_bos_token"):
             fast_tokenizer.add_bos_token = slow_tokenizer.add_bos_token
         if hasattr(fast_tokenizer, "add_eos_token") and hasattr(slow_tokenizer, "add_eos_token"):
@@ -667,8 +682,18 @@ def fix_untrained_tokens(model, tokenizer, train_dataset, eps = 1e-16):
     embedding_matrix = model.get_input_embeddings ().weight
     lm_head_matrix   = model.get_output_embeddings().weight
 
+    # Ignore some model checks for now
+    if model.config._name_or_path in  IGNORED_TOKENIZER_NAMES:
+        return
+    pass
+
     # Get untrained tokens
-    indicator_untrained = torch.amax(embedding_matrix, axis = 1) <= eps
+    indicator_untrained1 = torch.amax(embedding_matrix, axis = 1) <= eps
+    # Check lm_head as well
+    indicator_untrained2 = torch.amax(lm_head_matrix,   axis = 1) <= eps
+    # Combine both checks
+    indicator_untrained = indicator_untrained1 & indicator_untrained2
+    
     where_untrained = torch.where(indicator_untrained)[0]
     n_untrained = where_untrained.shape[0]
     n_trained = embedding_matrix.shape[0] - n_untrained
