@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__version__ = "2024.7"
+__version__ = "2024.8"
 
 __all__ = [
     "prepare_model_for_kbit_training",
@@ -33,6 +33,7 @@ __all__ = [
     "unsloth_offloaded_gradient_checkpoint",
     "torch_compile_options",
     "patch_linear_scaling",
+    "patch_llama_rope_scaling",
     "check_nvidia",
     "create_boolean_mask",
     "torch_amp_custom_fwd",
@@ -121,7 +122,8 @@ pass
 # =============================================
 # torch.cuda.amp.custom_fwd is deprecated >= 2.4
 import torch
-if Version(torch.__version__) < Version("2.4.0"):
+torch_version = torch.__version__
+if Version(torch_version) < Version("2.4.0"):
     torch_amp_custom_fwd = torch.cuda.amp.custom_fwd
     torch_amp_custom_bwd = torch.cuda.amp.custom_bwd
 else:
@@ -133,37 +135,47 @@ pass
 # =============================================
 # Get Flash Attention v2 if Ampere (RTX 30xx, A100)
 import bitsandbytes as bnb
-from transformers.models.llama.modeling_llama import logger
 from transformers import AutoTokenizer
+from transformers.utils.import_utils import _is_package_available
 
 major_version, minor_version = torch.cuda.get_device_capability()
 SUPPORTS_BFLOAT16 = False
 
 if major_version >= 8:
     SUPPORTS_BFLOAT16 = True
-    try:
-        from flash_attn import flash_attn_func
+    if _is_package_available("flash_attn"):
         # Check for CUDA linking errors "undefined symbol: _ZNK3c106SymIntltEl"
         try:
             from flash_attn.flash_attn_interface import flash_attn_cuda
             HAS_FLASH_ATTENTION = True
         except:
-            logger.warning_once(
+            print(
                 "Unsloth: Your Flash Attention 2 installation seems to be broken?\n"\
                 "A possible explanation is you have a new CUDA version which isn't\n"\
                 "yet compatible with FA2? Please file a ticket to Unsloth or FA2.\n"\
-                "We shall now use Xformers instead, which gets a 0.01% performance hit.\n"\
+                "We shall now use Xformers instead, which does not have any performance hits!\n"\
                 "We found this negligible impact by benchmarking on 1x A100."
             )
+
+            # Stop Flash Attention from importing!
+            import transformers.utils.import_utils
+            transformers.utils.import_utils.is_flash_attn_2_available = lambda *args, **kwargs: False
+            import transformers.utils
+            transformers.utils.is_flash_attn_2_available = lambda *args, **kwargs: False
+
             HAS_FLASH_ATTENTION = False
-    except:
+        pass
+    else:
         HAS_FLASH_ATTENTION = False
 else:
     # Tri Dao's benchmark shows xformers is faster for now.
     HAS_FLASH_ATTENTION = False
 pass
-import xformers.ops.fmha as xformers
-xformers_attention = xformers.memory_efficient_attention
+
+from transformers.models.llama.modeling_llama import logger
+
+# =============================================
+# Get Xformers
 from xformers import __version__ as xformers_version
 # Temporarily disable 0.0.27 and higher - inference issues
 if Version(xformers_version) >= Version("0.0.27"):
@@ -181,9 +193,41 @@ if Version(xformers_version) >= Version("0.0.27"):
     )
 pass
 
+if   Version(torch_version) < Version("2.2.0") and Version(xformers_version) >= Version("0.0.24"):
+    raise ImportError(
+        f"Unsloth: You have torch = {torch_version} but xformers = {xformers_version}.\n"\
+        f"Please install xformers < 0.0.24 for torch = {torch_version}."
+    )
+elif Version(torch_version) < Version("2.3.0") and Version(xformers_version) >= Version("0.0.26"):
+    raise ImportError(
+        f"Unsloth: You have torch = {torch_version} but xformers = {xformers_version}.\n"\
+        f"Please install xformers < 0.0.26 for torch = {torch_version}."
+    )
+elif Version(torch_version) < Version("2.4.0") and Version(xformers_version) >= Version("0.0.27"):
+    raise ImportError(
+        f"Unsloth: You have torch = {torch_version} but xformers = {xformers_version}.\n"\
+        f"Please install xformers < 0.0.27 for torch = {torch_version}."
+    )
+pass
+
+from xformers._cpp_lib import _register_extensions
+try:
+    _register_extensions() # Check if C++ modules are loaded correctly
+except Exception as error:
+    raise ImportError(
+        "Unsloth: Xformers was not installed correctly.\n"\
+        "Please install xformers separately first.\n"\
+        "Then confirm if it's correctly installed by running:\n"\
+        "python -m xformers.info\n\n"
+        "Longer error message:\n" + str(error)
+    )
+pass
+import xformers.ops.fmha as xformers
+xformers_attention = xformers.memory_efficient_attention
+
 # Check TRL version
 from trl import __version__ as trl_version
-if Version(xformers_version) >= Version("0.9.0"):
+if Version(trl_version) >= Version("0.9.0"):
     raise ImportError(
         "Unsloth: If you are in Colab, we updated the top cell install instructions - please change it to below "\
         "then press Disconnect Runtime and then Restart it.\n"\
@@ -197,8 +241,6 @@ if Version(xformers_version) >= Version("0.9.0"):
         'Please downgrade TRL via `pip install --force-reinstall "trl<0.9.0"'
     )
 pass
-
-# =============================================
 
 # =============================================
 # Torch compile settings
@@ -332,7 +374,13 @@ def patch_tokenizer(model, tokenizer):
         Check if pad_token is not the same as eos_token otherwise the loss will ignore it!!
         Fixes https://github.com/unslothai/unsloth/issues/5
     """
-    possible_reserved_tokens = ("<|reserved", "<|placeholder", "[control")
+    possible_reserved_tokens = (
+        "<|reserved",                # Llama-3
+        "<|placeholder",             # Phi-3
+        "[control",                  # Mistral type models
+        "<pad>",                     # Mistral Nemo
+        "<|finetune_right_pad_id|>", # Llama-3.1
+    )
 
     if model is not None:
         model.config.update({"unsloth_version" : __version__})
@@ -386,7 +434,10 @@ def patch_tokenizer(model, tokenizer):
         tokenizer.pad_token = possible_pad_token
         if model is not None:
             config = model.config.update({"pad_token_id" : tokenizer.pad_token_id})
-    pass
+    else:
+        if model is not None:
+            if model.config.pad_token_id is None:
+                config = model.config.update({"pad_token_id" : tokenizer.pad_token_id})
     return model, tokenizer
 pass
 
@@ -394,32 +445,35 @@ pass
 # =============================================
 # Weirdly LoraLayer.update_layer downcasts PEFT layers to float16??
 # For mixed precision, we need it to be in float32 not float16.
-from peft.tuners.lora.layer import LoraLayer
-import inspect, re
-try:
-    source = inspect.getsource(LoraLayer.update_layer)
-    text = "if weight is not None:\n"
-    start = source.find(text) + len(text)
-    end = source.find("self.to(weight.device)", start)
-    spaces = re.findall(r"^([ ]{1,})break", source, flags = re.MULTILINE)[0]
-    source = source.replace(source[start : end], spaces)
-    spaces = len(re.match(r"[\s]{1,}", source).group(0))
-    lines = source.split("\n")
-    source = "\n".join(x[spaces:] for x in lines)
-    source = re.sub("([^\.])nn\.", r"\1torch.nn.", source)
-    source = source.replace("def update_layer", "def LoraLayer_update_layer")
-    exec(source, globals())
-
-    # Fix up incorrect downcasting of LoRA weights
+from peft import __version__ as peft_version
+if Version(peft_version) < Version("0.12.0"):
     from peft.tuners.lora.layer import LoraLayer
-    LoraLayer.update_layer = LoraLayer_update_layer
-    from peft.tuners.lora import LoraLayer
-    LoraLayer.update_layer = LoraLayer_update_layer
-except:
-    logger.warning_once(
-        "Unsloth unsuccessfully patched LoraLayer.update_layer. Please file a bug report.\n"\
-        "Luckily, your training run will still work in the meantime!"
-    )
+    import inspect, re
+    try:
+        source = inspect.getsource(LoraLayer.update_layer)
+        text = "if weight is not None:\n"
+        start = source.find(text) + len(text)
+        end = source.find("self.to(weight.device)", start)
+        spaces = re.findall(r"^([ ]{1,})break", source, flags = re.MULTILINE)[0]
+        source = source.replace(source[start : end], spaces)
+        spaces = len(re.match(r"[\s]{1,}", source).group(0))
+        lines = source.split("\n")
+        source = "\n".join(x[spaces:] for x in lines)
+        source = re.sub("([^\.])nn\.", r"\1torch.nn.", source)
+        source = source.replace("def update_layer", "def LoraLayer_update_layer")
+        exec(source, globals())
+
+        # Fix up incorrect downcasting of LoRA weights
+        from peft.tuners.lora.layer import LoraLayer
+        LoraLayer.update_layer = LoraLayer_update_layer
+        from peft.tuners.lora import LoraLayer
+        LoraLayer.update_layer = LoraLayer_update_layer
+    except:
+        logger.warning_once(
+            "Unsloth unsuccessfully patched LoraLayer.update_layer. Please file a bug report.\n"\
+            "Luckily, your training run will still work in the meantime!"
+        )
+    pass
 pass
 # =============================================
 
@@ -745,7 +799,7 @@ def patch_linear_scaling(
     fix_rope_function = """
     if getattr(self.config, "rope_scaling", None) is None:
         self.rotary_emb = {rope_function}(
-            self.head_dim,
+            dim = self.head_dim,
             max_position_embeddings=self.max_position_embeddings,
             base=self.rope_theta,
         )
@@ -754,7 +808,7 @@ def patch_linear_scaling(
         scaling_factor = self.config.rope_scaling["factor"]
         if scaling_type == "linear":
             self.rotary_emb = {scaled_rope_function}(
-                self.head_dim,
+                dim = self.head_dim,
                 max_position_embeddings=self.max_position_embeddings,
                 scaling_factor=scaling_factor,
                 base=self.rope_theta,
@@ -766,6 +820,91 @@ def patch_linear_scaling(
     fix_rope_function = fix_rope_function.format(
         rope_function        = rope_module.__name__,
         scaled_rope_function = scaled_rope_module.__name__,
+    )
+    rotary_emb = re.findall(
+        "self.rotary_emb = .+?\)", function,
+        flags = re.DOTALL | re.MULTILINE,
+    )
+    if len(rotary_emb) == 0: return None, function
+    rotary_emb = rotary_emb[0]
+    function = function.replace(rotary_emb, fix_rope_function, 1)
+    function = exec_code + "\n\n" + function
+    return init_name, function
+pass
+
+
+# Patches for Llama-3 LlamaExtendedRotaryEmbedding
+def patch_llama_rope_scaling(
+    model_name = "llama",
+    rope_module = None,
+    scaled_rope_module = None,
+    extended_rope_module = None,
+    attention_module = None,
+):
+    assert(\
+        rope_module is not None and \
+        scaled_rope_module is not None and \
+        extended_rope_module is not None
+    )
+    assert(attention_module is not None)
+
+    rope_name = rope_module.__name__
+    scaled_rope_name = scaled_rope_module.__name__
+    model_filepath = f"transformers.models.{model_name}.modeling_{model_name}"
+    exec_code = \
+        f"import torch.nn as nn\n"\
+        f"from typing import Union, Optional, List, Any, Callable, Tuple\n"\
+        f"from {model_filepath} import logger, "\
+        f"{model_name.title()}Attention, {model_name.title()}Config"
+
+    try:
+        function = inspect.getsource(attention_module.__init__)
+    except:
+        # Most likely already patched!
+        return None, None
+    where = function.find("def")
+    function = function.split("\n")
+    function = "\n".join(x[where:] for x in function)
+    init_name = f"{model_name.title()}Attention__init__"
+    function = function.replace("def __init__", f"def {init_name}")
+    function = function.replace(
+        "super().__init__()",
+        f"super({model_name.title()}Attention, self).__init__()",
+    )
+    fix_rope_function = """
+    if getattr(self.config, "rope_scaling", None) is None:
+        self.rotary_emb = {rope_function}(
+            dim = self.head_dim,
+            max_position_embeddings=self.max_position_embeddings,
+            base=self.rope_theta,
+        )
+    else:
+        scaling_type1 = self.config.rope_scaling.get("type", None)
+        scaling_type2 = self.config.rope_scaling.get("rope_type", None)
+        scaling_type = scaling_type1 if scaling_type1 is not None else scaling_type2
+        scaling_factor = self.config.rope_scaling.get("factor")
+
+        if scaling_type == "linear":
+            self.rotary_emb = {scaled_rope_function}(
+                dim = self.head_dim,
+                max_position_embeddings=self.max_position_embeddings,
+                scaling_factor=scaling_factor,
+                base=self.rope_theta,
+            )
+        elif scaling_type == "llama3":
+            self.rotary_emb = {extended_rope_function}(
+                dim = self.head_dim,
+                max_position_embeddings=self.max_position_embeddings,
+                base=self.rope_theta,
+            )
+        else:
+            raise ValueError(f"Unknown RoPE scaling type {{scaling_type}}")
+    pass
+    """
+    fix_rope_function = fix_rope_function.format(
+        rope_function          = rope_module.__name__,
+        scaled_rope_function   = scaled_rope_module.__name__,
+        extended_rope_function = extended_rope_module.__name__,
     )
     rotary_emb = re.findall(
         "self.rotary_emb = .+?\)", function,
