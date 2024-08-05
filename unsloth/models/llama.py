@@ -14,6 +14,7 @@
 
 import torch
 import gc
+import math
 from typing import Optional, Tuple, List, Union
 from ._utils import *
 from ._utils import __version__
@@ -682,23 +683,28 @@ def LlamaModel_fast_forward(
 
     # Gemma2 has alternating SWA and global attn
     if IS_GEMMA2 and not hasattr(self, "SWA_mask"):
-        n = self.config.max_position_embeddings
-        # masked_fill is making stuff slower!
-        # self. GA_mask = create_boolean_mask(n = n, sliding_window = 0)
-        # self.SWA_mask = create_boolean_mask(n = n, sliding_window = self.config.sliding_window)
-        from transformers.modeling_attn_mask_utils import AttentionMaskConverter
-        self.SWA_mask = AttentionMaskConverter(
-            is_causal = True,
-            sliding_window = self.config.sliding_window,
-        )\
-            .to_causal_4d(1, n, n, dtype = inputs_embeds.dtype, device = "cuda:0",)\
-            .squeeze(0).squeeze(0)
+        if HAS_FLASH_ATTENTION_SOFTCAPPING:
+            self.SWA_mask = True
+            self.GA_mask  = False
+        else:
+            n = self.config.max_position_embeddings
+            # masked_fill is making stuff slower!
+            # self. GA_mask = create_boolean_mask(n = n, sliding_window = 0)
+            # self.SWA_mask = create_boolean_mask(n = n, sliding_window = self.config.sliding_window)
+            from transformers.modeling_attn_mask_utils import AttentionMaskConverter
+            self.SWA_mask = AttentionMaskConverter(
+                is_causal = True,
+                sliding_window = self.config.sliding_window,
+            )\
+                .to_causal_4d(1, n, n, dtype = inputs_embeds.dtype, device = "cuda:0",)\
+                .squeeze(0).squeeze(0)
 
-        self.GA_mask = AttentionMaskConverter(
-            is_causal = True,
-        )\
-            .to_causal_4d(1, n, n, dtype = inputs_embeds.dtype, device = "cuda:0",)\
-            .squeeze(0).squeeze(0)
+            self.GA_mask = AttentionMaskConverter(
+                is_causal = True,
+            )\
+                .to_causal_4d(1, n, n, dtype = inputs_embeds.dtype, device = "cuda:0",)\
+                .squeeze(0).squeeze(0)
+        pass
     pass
 
     # Go through every layer!
@@ -1031,7 +1037,7 @@ class LlamaRotaryEmbedding(torch.nn.Module):
     def extend_rope_embedding(self, x, seq_len):
         if seq_len <= self.current_rope_size: return
         # Iteratively grow by increments of 8192
-        self.current_rope_size = int(round(seq_len / 8192)) * 8192
+        self.current_rope_size = math.ceil(seq_len / 8192) * 8192
         self._set_cos_sin_cache(self.current_rope_size, device = "cuda:0", dtype = x.dtype)
     pass
 pass
@@ -1104,7 +1110,7 @@ class LlamaExtendedRotaryEmbedding(torch.nn.Module):
         # in FP32. They are applied (multiplied) in FP32 as well.
         self.current_rope_size = seq_len
         
-        t = torch.arange(self.current_rope_size, device="cpu", dtype=torch.int64).float()
+        t = torch.arange(self.current_rope_size, device=self.inv_freq.device, dtype=torch.int64).float()
 
         freqs = torch.outer(t, self.inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
@@ -1153,7 +1159,7 @@ class LlamaExtendedRotaryEmbedding(torch.nn.Module):
     def extend_rope_embedding(self, x, seq_len):
         if seq_len <= self.current_rope_size: return
         # Iteratively grow by increments of 8192
-        self.current_rope_size = int(round(seq_len / 8192)) * 8192
+        self.current_rope_size = math.ceil(seq_len / 8192) * 8192
         self._set_cos_sin_cache(self.current_rope_size, device = "cuda:0", dtype = x.dtype)
     pass
 pass
@@ -2012,7 +2018,8 @@ class FastLlamaModel:
                     model.peft_config[active_adapter].base_model_name_or_path = name
                 pass
             # Add revision to enable future fast inference paths
-            model.peft_config[active_adapter].revision = f"unsloth"
+            # [TODO] Bugs out!see https://github.com/unslothai/unsloth/issues/492
+            # model.peft_config[active_adapter].revision = f"unsloth"
         pass
 
         from transformers.trainer import Trainer 
